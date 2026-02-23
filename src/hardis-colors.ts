@@ -1,6 +1,5 @@
 import * as vscode from "vscode";
 import * as fs from "fs-extra";
-import * as path from "path";
 import {
   execSfdxJson,
   getUsernameInstanceUrl,
@@ -30,9 +29,10 @@ export class HardisColors {
   currentDefaultOrgDomain: string | undefined | null = undefined;
   initializing: boolean = true;
   majorOrgBranch: string | undefined = undefined;
+  invalidCustomOrgColorWarningShown: boolean = false;
 
   // Initialize file watchers only if we are in a sfdx project
-  constructor() {}
+  constructor() { }
 
   async init() {
     this.initializing = true;
@@ -58,12 +58,8 @@ export class HardisColors {
     if (vscode.workspace.workspaceFolders) {
       const sfdxConfigPaths = await listLocalSfConfigFiles();
       for (const sfdxConfigPath of sfdxConfigPaths) {
-        const sfdxConfigFullPath = path.join(
-          vscode.workspace.workspaceFolders[0].uri.fsPath,
-          sfdxConfigPath,
-        );
-        if (fs.existsSync(sfdxConfigFullPath)) {
-          await this.manageColor(sfdxConfigFullPath);
+        if (fs.existsSync(sfdxConfigPath)) {
+          await this.manageColor(sfdxConfigPath);
           break;
         }
       }
@@ -157,7 +153,7 @@ export class HardisColors {
     if (fileDefaultOrg !== this.currentDefaultOrg) {
       this.currentDefaultOrg = fileDefaultOrg;
       this.currentDefaultOrgDomain = await getUsernameInstanceUrl(
-        this.currentDefaultOrg || "",
+        `"${this.currentDefaultOrg}"`,
       );
       const orgColor = await this.getCurrentDefaultOrgColor();
       await this.applyColor(orgColor);
@@ -179,19 +175,104 @@ export class HardisColors {
     };
   }
 
+  /**
+   * Match a domain against customOrgColors keys, supporting wildcard (`*`) patterns.
+   * Exact matches take priority over wildcard matches.
+   */
+  getCustomOrgColor(
+    domain: string,
+    customOrgColors: Record<string, string>,
+  ): string | null {
+    if (!domain) {
+      return null;
+    }
+    const validURL = (url: string) => {
+      const cleanedUrl = url.replaceAll("*", "placeholder");
+      try {
+        new URL(cleanedUrl);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const normalize = (s: string) => s.replace(/\/+$/, "").toLowerCase();
+    const normalizedDomain = normalize(domain);
+    const wildcardPatterns: string[] = [];
+    let hasInvalidPattern: boolean = false;
+    let fullURLMatchColor: string | null = null;
+    for (const pattern of Object.keys(customOrgColors)) {
+      const normalizedPattern = normalize(pattern);
+      if (!validURL(normalizedPattern)) {
+        hasInvalidPattern = true;
+      }
+      if (pattern.includes("*")) {
+        wildcardPatterns.push(pattern);
+      } else if (normalizedPattern === normalizedDomain) {
+        fullURLMatchColor = customOrgColors[pattern];
+      }
+    }
+    if (hasInvalidPattern) {
+      if (this.invalidCustomOrgColorWarningShown === false) {
+        this.invalidCustomOrgColorWarningShown = true;
+        vscode.window.showWarningMessage(
+          "🦙 One or more custom org color URLs are invalid. Please check your configuration.",
+          "Close",
+        );
+      }
+    }
+    if (fullURLMatchColor) {
+      return fullURLMatchColor;
+    }
+
+    for (const pattern of wildcardPatterns) {
+      // Build regex: split on '*', escape each part, join with '.*'
+      const regex = new RegExp(
+        "^" +
+        normalize(pattern)
+          .split("*")
+          .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+          .join(".*") +
+        "$",
+        "i",
+      );
+      if (regex.test(normalizedDomain)) {
+        return customOrgColors[pattern];
+      }
+    }
+
+    return null;
+  }
+
   // Get org color :)
   async getCurrentDefaultOrgColor() {
     // Get user customized color directly in config/.sfdx-hardis.yml
-    let forcedColor = null;
     const sfdxHardisConfig = await readSfdxHardisConfig();
     const customOrgColors = sfdxHardisConfig.customOrgColors || {};
-    if (customOrgColors[this.currentDefaultOrgDomain || ""]) {
-      forcedColor = customOrgColors[this.currentDefaultOrgDomain || ""];
+    const forcedColor = this.getCustomOrgColor(
+      this.currentDefaultOrgDomain || "",
+      customOrgColors,
+    );
+    if (
+      this.currentDefaultOrgDomain &&
+      (this.currentDefaultOrgDomain.includes(".sandbox.") ||
+        this.currentDefaultOrgDomain.includes(".scratch."))
+    ) {
+      // We are in a dev sandbox or scratch org !
+      const isMajorOrg = await this.isMajorOrg(
+        this.currentDefaultOrgDomain || "",
+      );
+      if (isMajorOrg) {
+        vscode.window.showWarningMessage(
+          `🦙 Your default org is a MAJOR org linked to git branch ${this.majorOrgBranch}, be careful because the CI/CD Server is supposed to deploy in this org, not you 😘`,
+          "Close",
+        );
+        return forcedColor || this.describeOrgColors()["major"]; // orange !
+      }
+      return forcedColor || this.describeOrgColors()["dev"]; // blue
     }
-    // https://salesforce.stackexchange.com/questions/297452/determine-if-authorized-org-with-salesforcedx-is-developer-or-production
-    // Detect if sandbox or not
+    // Production or dev org
     const orgRes = await execSfdxJson(
-      `sf data query --query "SELECT IsSandbox,OrganizationType FROM Organization LIMIT 1" --target-org ${this.currentDefaultOrg}`,
+      `sf data query --query "SELECT OrganizationType FROM Organization LIMIT 1" --target-org "${this.currentDefaultOrg}"`,
       {
         fail: false,
         output: true,
@@ -201,20 +282,7 @@ export class HardisColors {
     );
     if (orgRes?.result?.records?.length === 1) {
       const org = orgRes.result.records[0];
-      if (org.IsSandbox === true) {
-        // We are in a dev sandbox or scratch org !
-        const isMajorOrg = await this.isMajorOrg(
-          this.currentDefaultOrgDomain || "",
-        );
-        if (isMajorOrg) {
-          vscode.window.showWarningMessage(
-            `🦙 Your default org is a MAJOR org linked to git branch ${this.majorOrgBranch}, be careful because the CI/CD Server is supposed to deploy in this org, not you 😘`,
-            "Close",
-          );
-          return forcedColor || this.describeOrgColors()["major"]; // orange !
-        }
-        return forcedColor || null; // green !
-      } else if (PRODUCTION_EDITIONS.includes(org.OrganizationType)) {
+      if (PRODUCTION_EDITIONS.includes(org.OrganizationType)) {
         // We are in production !!
         vscode.window.showWarningMessage(
           "🦙 Your default org is a PRODUCTION org, be careful what you do 😲",
@@ -222,8 +290,6 @@ export class HardisColors {
         );
         return forcedColor || this.describeOrgColors()["production"]; // red !
       }
-      // Dev org, trial org...
-      return forcedColor || this.describeOrgColors()["dev"]; // blue
     }
     // Default color
     return forcedColor || null;
@@ -233,6 +299,8 @@ export class HardisColors {
   async applyColor(color: string | null) {
     if (vscode.workspace.workspaceFolders) {
       const config = vscode.workspace.getConfiguration();
+      const colorUpdateLocation =
+        config.get("vsCodeSfdxHardis.colorUpdateLocation") || "Workspace";
       let colorCustomization = config.get("workbench.colorCustomizations");
       // Ensure colorCustomization is an object and convert proxy to plain object
       if (
@@ -253,7 +321,9 @@ export class HardisColors {
         await config.update(
           "workbench.colorCustomizations",
           colorCustomObj,
-          vscode.ConfigurationTarget.Workspace,
+          colorUpdateLocation === "Workspace"
+            ? vscode.ConfigurationTarget.Workspace
+            : vscode.ConfigurationTarget.Global,
         );
       } else if (
         colorCustomObj["statusBar.background"] ||
@@ -347,7 +417,9 @@ export class HardisColors {
           await config.update(
             "workbench.colorCustomizations",
             colorCustomObj,
-            vscode.ConfigurationTarget.Workspace,
+            colorUpdateLocation === "Workspace"
+              ? vscode.ConfigurationTarget.Workspace
+              : vscode.ConfigurationTarget.Global,
           );
         }
       }
