@@ -268,7 +268,7 @@ export class HardisColors {
         );
         return forcedColor || this.describeOrgColors()["major"]; // orange !
       }
-      return forcedColor || this.describeOrgColors()["dev"]; // blue
+      return forcedColor || null;
     }
     // Production or dev org
     const orgRes = await execSfdxJson(
@@ -290,6 +290,7 @@ export class HardisColors {
         );
         return forcedColor || this.describeOrgColors()["production"]; // red !
       }
+      return forcedColor || this.describeOrgColors()["dev"]; // blue
     }
     // Default color
     return forcedColor || null;
