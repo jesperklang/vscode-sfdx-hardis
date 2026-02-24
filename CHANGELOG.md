@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Custom colors: Fixed a bug where the incorrect color logic for set for Sandbox- and Scratch orgs. Also moved back the dev color to where it was in 6.28.0.
+
 ## [6.29.0] 2025-02-24
 
 - Custom Color Improvements
