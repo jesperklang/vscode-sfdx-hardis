@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+
+## [6.29.0] 2025-02-24
+
 - Custom Color Improvements
   - Support for selecting which settings.json file to update the colors to (Workspace or User).
   - Added org URL Wildcard Support for colors. Example 'https://yourcompany--*.sandbox.my.salesforce.com'
